@@ -20,6 +20,8 @@ package org.apache.pulsar.broker.authorization;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import java.net.SocketAddress;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -31,9 +33,13 @@ import org.apache.pulsar.broker.ServiceConfiguration;
 import org.apache.pulsar.broker.authentication.AuthenticationDataSource;
 import org.apache.pulsar.broker.authentication.AuthenticationParameters;
 import org.apache.pulsar.broker.resources.PulsarResources;
+import org.apache.pulsar.client.admin.GrantTopicPermissionOptions;
+import org.apache.pulsar.client.admin.RevokeTopicPermissionOptions;
 import org.apache.pulsar.common.naming.NamespaceName;
 import org.apache.pulsar.common.naming.TopicName;
 import org.apache.pulsar.common.policies.data.AuthAction;
+import org.apache.pulsar.common.policies.data.BrokerOperation;
+import org.apache.pulsar.common.policies.data.ClusterOperation;
 import org.apache.pulsar.common.policies.data.NamespaceOperation;
 import org.apache.pulsar.common.policies.data.PolicyName;
 import org.apache.pulsar.common.policies.data.PolicyOperation;
@@ -178,6 +184,14 @@ public class AuthorizationService {
     public CompletableFuture<Void> grantPermissionAsync(TopicName topicName, Set<AuthAction> actions, String role,
                                                         String authDataJson) {
         return provider.grantPermissionAsync(topicName, actions, role, authDataJson);
+    }
+
+    public CompletableFuture<Void> grantPermissionAsync(List<GrantTopicPermissionOptions> options) {
+        return provider.grantPermissionAsync(options);
+    }
+
+    public CompletableFuture<Void> revokePermissionAsync(List<RevokeTopicPermissionOptions> options) {
+        return provider.revokePermissionAsync(options);
     }
 
     /**
@@ -532,6 +546,72 @@ public class AuthorizationService {
         }
     }
 
+    public CompletableFuture<Boolean> allowBrokerOperationAsync(String clusterName,
+                                                                String brokerId,
+                                                                BrokerOperation brokerOperation,
+                                                                String originalRole,
+                                                                String role,
+                                                                AuthenticationDataSource authData) {
+        if (!isValidOriginalPrincipal(role, originalRole, authData)) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        if (isProxyRole(role)) {
+            final var isRoleAuthorizedFuture = provider.allowBrokerOperationAsync(clusterName, brokerId,
+                    brokerOperation, role, authData);
+            final var isOriginalAuthorizedFuture =  provider.allowBrokerOperationAsync(clusterName, brokerId,
+                    brokerOperation, originalRole, authData);
+            return isRoleAuthorizedFuture.thenCombine(isOriginalAuthorizedFuture,
+                    (isRoleAuthorized, isOriginalAuthorized) -> isRoleAuthorized && isOriginalAuthorized);
+        } else {
+            return provider.allowBrokerOperationAsync(clusterName, brokerId, brokerOperation, role, authData);
+        }
+    }
+
+    public CompletableFuture<Boolean> allowClusterOperationAsync(String clusterName,
+                                                                ClusterOperation clusterOperation,
+                                                                String originalRole,
+                                                                String role,
+                                                                AuthenticationDataSource authData) {
+        if (!isValidOriginalPrincipal(role, originalRole, authData)) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        if (isProxyRole(role)) {
+            final var isRoleAuthorizedFuture = provider.allowClusterOperationAsync(clusterName,
+                    clusterOperation, role, authData);
+            final var isOriginalAuthorizedFuture =  provider.allowClusterOperationAsync(clusterName,
+                    clusterOperation, originalRole, authData);
+            return isRoleAuthorizedFuture.thenCombine(isOriginalAuthorizedFuture,
+                    (isRoleAuthorized, isOriginalAuthorized) -> isRoleAuthorized && isOriginalAuthorized);
+        } else {
+            return provider.allowClusterOperationAsync(clusterName, clusterOperation, role, authData);
+        }
+    }
+
+    public CompletableFuture<Boolean> allowClusterPolicyOperationAsync(String clusterName,
+                                                                       PolicyName policy,
+                                                                       PolicyOperation operation,
+                                                                 String originalRole,
+                                                                 String role,
+                                                                 AuthenticationDataSource authData) {
+        if (!isValidOriginalPrincipal(role, originalRole, authData)) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        if (isProxyRole(role)) {
+            final var isRoleAuthorizedFuture = provider.allowClusterPolicyOperationAsync(clusterName, role,
+                    policy, operation, authData);
+            final var isOriginalAuthorizedFuture =  provider.allowClusterPolicyOperationAsync(clusterName, originalRole,
+                    policy, operation, authData);
+            return isRoleAuthorizedFuture.thenCombine(isOriginalAuthorizedFuture,
+                    (isRoleAuthorized, isOriginalAuthorized) -> isRoleAuthorized && isOriginalAuthorized);
+        } else {
+            return provider.allowClusterPolicyOperationAsync(clusterName, role, policy, operation, authData);
+        }
+    }
+
+
     /**
      * @deprecated - will be removed after 2.12. Use async variant.
      */
@@ -814,5 +894,21 @@ public class AuthorizationService {
         } catch (ExecutionException e) {
             throw new RestException(e.getCause());
         }
+    }
+
+    public CompletableFuture<Void> removePermissionsAsync(TopicName topicName) {
+        return provider.removePermissionsAsync(topicName);
+    }
+
+    public CompletableFuture<Map<String, Set<AuthAction>>> getPermissionsAsync(TopicName topicName) {
+        return provider.getPermissionsAsync(topicName);
+    }
+
+    public CompletableFuture<Map<String, Set<AuthAction>>> getPermissionsAsync(NamespaceName namespaceName) {
+        return provider.getPermissionsAsync(namespaceName);
+    }
+
+    public CompletableFuture<Map<String, Set<String>>> getSubscriptionPermissionsAsync(NamespaceName namespaceName) {
+        return provider.getSubscriptionPermissionsAsync(namespaceName);
     }
 }

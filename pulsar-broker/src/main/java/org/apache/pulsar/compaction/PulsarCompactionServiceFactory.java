@@ -24,11 +24,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import lombok.AccessLevel;
+import lombok.Getter;
 import org.apache.pulsar.broker.PulsarServerException;
 import org.apache.pulsar.broker.PulsarService;
 
 public class PulsarCompactionServiceFactory implements CompactionServiceFactory {
 
+    @Getter(AccessLevel.PROTECTED)
     private PulsarService pulsarService;
 
     private volatile Compactor compactor;
@@ -51,7 +54,7 @@ public class PulsarCompactionServiceFactory implements CompactionServiceFactory 
     }
 
     protected Compactor newCompactor() throws PulsarServerException {
-        return new TwoPhaseCompactor(pulsarService.getConfiguration(),
+        return new PublishingOrderCompactor(pulsarService.getConfiguration(),
                 pulsarService.getClient(), pulsarService.getBookKeeperClient(),
                 pulsarService.getCompactorExecutor());
     }

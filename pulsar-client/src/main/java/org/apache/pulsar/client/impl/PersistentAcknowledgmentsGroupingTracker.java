@@ -124,7 +124,18 @@ public class PersistentAcknowledgmentsGroupingTracker implements Acknowledgments
             // Already included in a cumulative ack
             return true;
         } else {
-            return pendingIndividualAcks.contains(MessageIdAdvUtils.discardBatch(messageIdAdv));
+            // If "batchIndexAckEnabled" is false, the batched messages acknowledgment will be traced by
+            // pendingIndividualAcks. So no matter what type the message ID is, check with "pendingIndividualAcks"
+            // first.
+            MessageIdAdv key = MessageIdAdvUtils.discardBatch(messageIdAdv);
+            if (pendingIndividualAcks.contains(key)) {
+                return true;
+            }
+            if (messageIdAdv.getBatchIndex() >= 0) {
+                ConcurrentBitSetRecyclable bitSet = pendingIndividualBatchIndexAcks.get(key);
+                return bitSet != null && !bitSet.get(messageIdAdv.getBatchIndex());
+            }
+            return false;
         }
     }
 
@@ -301,7 +312,12 @@ public class PersistentAcknowledgmentsGroupingTracker implements Acknowledgments
             Optional<Lock> readLock = acquireReadLock();
             try {
                 doCumulativeAckAsync(messageId, bitSet);
-                return readLock.map(__ -> currentCumulativeAckFuture).orElse(CompletableFuture.completedFuture(null));
+                return readLock.map(__ -> {
+                    if (consumer.isAckReceiptEnabled() && lastCumulativeAck.compareTo(messageId) == 0) {
+                        return CompletableFuture.<Void>completedFuture(null);
+                    }
+                    return currentCumulativeAckFuture;
+                }).orElse(CompletableFuture.completedFuture(null));
             } finally {
                 readLock.ifPresent(Lock::unlock);
             }
@@ -313,8 +329,15 @@ public class PersistentAcknowledgmentsGroupingTracker implements Acknowledgments
                 MessageIdAdvUtils.discardBatch(msgId), __ -> {
                     final BitSet ackSet = msgId.getAckSet();
                     final ConcurrentBitSetRecyclable value;
-                    if (ackSet != null && !ackSet.isEmpty()) {
-                        value = ConcurrentBitSetRecyclable.create(ackSet);
+                    if (ackSet != null) {
+                        synchronized (ackSet) {
+                            if (!ackSet.isEmpty()) {
+                                value = ConcurrentBitSetRecyclable.create(ackSet);
+                            } else {
+                                value = ConcurrentBitSetRecyclable.create();
+                                value.set(0, msgId.getBatchSize());
+                            }
+                        }
                     } else {
                         value = ConcurrentBitSetRecyclable.create();
                         value.set(0, msgId.getBatchSize());
@@ -363,8 +386,11 @@ public class PersistentAcknowledgmentsGroupingTracker implements Acknowledgments
                     .ConnectException("Consumer connect fail! consumer state:" + consumer.getState()));
         }
         BitSetRecyclable bitSet;
-        if (msgId.getAckSet() != null) {
-            bitSet = BitSetRecyclable.valueOf(msgId.getAckSet().toLongArray());
+        BitSet ackSetFromMsgId = msgId.getAckSet();
+        if (ackSetFromMsgId != null) {
+            synchronized (ackSetFromMsgId) {
+                bitSet = BitSetRecyclable.valueOf(ackSetFromMsgId.toLongArray());
+            }
         } else {
             bitSet = BitSetRecyclable.create();
             bitSet.set(0, batchSize);

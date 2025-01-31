@@ -68,7 +68,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Load shedding strategy that unloads bundles from the highest loaded brokers.
- * This strategy is only configurable in the broker load balancer extenstions introduced by
+ * This strategy is only configurable in the broker load balancer extensions introduced by
  * PIP-192[https://github.com/apache/pulsar/issues/16691].
  *
  * This load shedding strategy has the following goals:
@@ -362,7 +362,7 @@ public class TransferShedder implements NamespaceUnloadStrategy {
             final double targetStd = conf.getLoadBalancerBrokerLoadTargetStd();
             boolean transfer = conf.isLoadBalancerTransferEnabled();
             if (stats.std() > targetStd
-                    || isUnderLoaded(context, stats.peekMinBroker(), stats.avg)
+                    || isUnderLoaded(context, stats.peekMinBroker(), stats)
                     || isOverLoaded(context, stats.peekMaxBroker(), stats.avg)) {
                 unloadConditionHitCount++;
             } else {
@@ -390,7 +390,7 @@ public class TransferShedder implements NamespaceUnloadStrategy {
                 UnloadDecision.Reason reason;
                 if (stats.std() > targetStd) {
                     reason = Overloaded;
-                } else if (isUnderLoaded(context, stats.peekMinBroker(), stats.avg)) {
+                } else if (isUnderLoaded(context, stats.peekMinBroker(), stats)) {
                     reason = Underloaded;
                     if (debugMode) {
                         log.info(String.format("broker:%s is underloaded:%s although "
@@ -528,6 +528,13 @@ public class TransferShedder implements NamespaceUnloadStrategy {
 
                     var bundleData = e.stats();
                     double maxBrokerBundleThroughput = bundleData.msgThroughputIn + bundleData.msgThroughputOut;
+                    if (maxBrokerBundleThroughput == 0) {
+                        if (debugMode) {
+                            log.info(String.format(CANNOT_UNLOAD_BUNDLE_MSG
+                                    + " It has zero throughput.", bundle));
+                        }
+                        continue;
+                    }
                     boolean swap = false;
                     List<Unload> minToMaxUnloads = new ArrayList<>();
                     double minBrokerBundleSwapThroughput = 0.0;
@@ -549,6 +556,9 @@ public class TransferShedder implements NamespaceUnloadStrategy {
                                 var minBrokerBundleThroughput =
                                         minBrokerBundleData.stats().msgThroughputIn
                                                 + minBrokerBundleData.stats().msgThroughputOut;
+                                if (minBrokerBundleThroughput == 0) {
+                                    continue;
+                                }
                                 var maxBrokerNewThroughputTmp = maxBrokerNewThroughput + minBrokerBundleThroughput;
                                 var minBrokerNewThroughputTmp = minBrokerNewThroughput - minBrokerBundleThroughput;
                                 if (maxBrokerNewThroughputTmp < maxBrokerThroughput
@@ -669,19 +679,27 @@ public class TransferShedder implements NamespaceUnloadStrategy {
     }
 
 
-    private boolean isUnderLoaded(LoadManagerContext context, String broker, double avgLoad) {
+    private boolean isUnderLoaded(LoadManagerContext context, String broker, LoadStats stats) {
         var brokerLoadDataOptional = context.brokerLoadDataStore().get(broker);
         if (brokerLoadDataOptional.isEmpty()) {
             return false;
         }
         var brokerLoadData = brokerLoadDataOptional.get();
-        if (brokerLoadData.getMsgThroughputEMA() < 1) {
+
+        var underLoadedMultiplier =
+                Math.min(0.5, Math.max(0.0, context.brokerConfiguration().getLoadBalancerBrokerLoadTargetStd() / 2.0));
+
+        if (brokerLoadData.getWeightedMaxEMA() < stats.avg * underLoadedMultiplier) {
             return true;
         }
 
-        return brokerLoadData.getWeightedMaxEMA()
-                < avgLoad * Math.min(0.5, Math.max(0.0,
-                context.brokerConfiguration().getLoadBalancerBrokerLoadTargetStd() / 2));
+        var maxBrokerLoadDataOptional = context.brokerLoadDataStore().get(stats.peekMaxBroker());
+        if (maxBrokerLoadDataOptional.isEmpty()) {
+            return false;
+        }
+
+        return brokerLoadData.getMsgThroughputEMA()
+                < maxBrokerLoadDataOptional.get().getMsgThroughputEMA() * underLoadedMultiplier;
     }
 
     private boolean isOverLoaded(LoadManagerContext context, String broker, double avgLoad) {
@@ -719,7 +737,7 @@ public class TransferShedder implements NamespaceUnloadStrategy {
         Map<String, BrokerLookupData> candidates = new HashMap<>(availableBrokers);
         for (var filter : brokerFilterPipeline) {
             try {
-                filter.filter(candidates, namespaceBundle, context)
+                filter.filterAsync(candidates, namespaceBundle, context)
                         .get(context.brokerConfiguration().getMetadataStoreOperationTimeoutSeconds(),
                                 TimeUnit.SECONDS);
             } catch (InterruptedException | ExecutionException | TimeoutException e) {
